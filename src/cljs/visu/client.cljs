@@ -20,7 +20,7 @@
 
 (def websocket* (atom nil))
 
-(def sketch-state
+(def sketch-state ;; unify state in a single atom or synchronization becomes an issue
   (atom
    {:width 1100
     :height 700
@@ -28,9 +28,10 @@
 
 (def sketch-data (atom {:data nil :selected nil}))
 
-(defn log [s]
-  (.log js/console (str s)))
+(defn log [& args]
+  (.log js/console (apply str args)))
 
+;; maybe this was overkill, not sure, but the log fn is fine
 (set! clojure.core/*print-fn* (fn [& s] (.log js/console (apply str s))))
 
 ;; --- WEBSOCKET CONNECTION ---
@@ -50,31 +51,31 @@
 (defn client-connect! []
   (log "establishing websocket ...")
   (reset! websocket* (js/WebSocket. "ws://localhost:9090"))
-  (doall
-   (map #(aset @websocket* (first %) (second %))
-        [["onopen" (fn [] (do
-                           (log "channel opened")
-                           (.send @websocket* {:type "greeting" :data []})))]
-         ["onclose" (fn [] (log "channel closed"))]
-         ["onerror" (fn [e] (log (str "ERROR:" e)))]
-         ["onmessage" (fn [m]
-                        (let [data (.-data m)]
-                          (take-all! data)))]]))
+  (doto @websocket* ;; use doto when operating on a single object
+    (aset "onopen" #(do (log "channel opened")
+                        (.send @websocket* {:type "greeting" :data []})))
+    (aset "onclose" #(log "channel closed"))
+    (aset "onerror" #(log (str "ERROR: " %)))
+    (aset "onmessage" #(let [data (.-data %)]
+                         (take-all! data))))
   (set! (.-onclick (sel1 :#disconnect-button)) (fn [] (.close @websocket*) (reset! websocket* nil)))
   (log "websocket loaded."))
 
 
 ;; --- DRAWING STUFF ---
 
-(def color-palette [(rgb-to-string [2 56 88])
-                    (rgb-to-string [4 90 141])
-                    (rgb-to-string [5 112 176])
-                    (rgb-to-string [54 144 192])
-                    (rgb-to-string [116 169 207])
-                    (rgb-to-string [166 189 219])
-                    (rgb-to-string [208 209 230])
-                    (rgb-to-string [236 231 242])
-                    (rgb-to-string [255 247 251])])
+(def palette [[2 56 88] ;; keep data transparent for manipulation
+              [4 90 141]
+              [5 112 176]
+              [54 144 192]
+              [116 169 207]
+              [166 189 219]
+              [208 209 230]
+              [236 231 242]
+              [255 247 251]])
+
+(defn color [temperature] ;; and only generate runtime representations when necessary
+  ((mapv rgb-to-string palette) temperature))
 
 (defn math-log [x base]
   (/ (Math/log x) (Math/log base)))
@@ -85,26 +86,26 @@
   (swap! sketch-state assoc :drawing false))
 
 
-(defn draw-cancer-graph []
+(defn draw-cancer-graph [] ;; split, possibly one or more functions generating the data
   (let [raw-data (@sketch-data :data)
         canvas (sel1 :#the-canvas)
         data (vals raw-data)
-        cancer-type (apply vector (keys raw-data))
+        cancer-type (vec (keys raw-data))
         scale (/ 400.0 35000)
         y-start 450
         bar-width 600
         step (/ 600 (count data))
-        the-children (apply vector (map #(% "Children") data))
-        mid-adults (apply vector (map #(% "Mid Adults") data))
-        older-adults (apply vector (map #(% "Older Adults") data))
-        summarized (apply vector (map #(reduce + (vals %)) data))
+        the-children (mapv #(% "Children") data)
+        mid-adults (mapv #(% "Mid Adults") data)
+        older-adults (mapv #(% "Older Adults") data)
+        summarized (mapv #(reduce + (vals %)) data)
         sorted-summarized (->> (map vector (range (count data)) summarized)
                               (into {})
                               (sort-by val)
                               keys
                               reverse)
         sorted-hashmap (into {} (map vector (range (count data)) sorted-summarized))]
-    (do
+    (do ;; do in let is redundant
       (cleanup)
       (draw-text canvas (/ bar-width 2) 20 "Female Cancer Distribution" 16 "center" "#50afde")
       (doall
@@ -199,17 +200,17 @@
 (defn scalar-mult-vector [k [x y]]
   [(* k x) (* k y)])
 
-(defn prepare-graph-data [data]
+(defn prepare-graph-data [data] ;; can be split further?
   (let [edges (@sketch-data :data)
         vertices (->> @sketch-state
-               :data
-               (map #(into [] %))
-               flatten
-               (into #{})
-               (map #(vector % {:position [(+ (/ (@sketch-state :width) 2) (* (rand 550) (Math/cos (rand (* 64 Math/PI)))))
-                                           (+ (/ (@sketch-state :height) 2) (* (rand 350) (Math/sin (rand (* 64 Math/PI)))))]
-                                :displacement [0 0]}))
-               (into {}))]
+                      :data
+                      (map #(into [] %))
+                      flatten
+                      (into #{})
+                      (map #(vector % {:position [(+ (/ (@sketch-state :width) 2) (* (rand 550) (Math/cos (rand (* 64 Math/PI)))))
+                                                  (+ (/ (@sketch-state :height) 2) (* (rand 350) (Math/sin (rand (* 64 Math/PI)))))]
+                                       :displacement [0 0]}))
+                      (into {}))]
     (swap! sketch-data assoc :data {:edges edges :vertices vertices :constants {:k (* 0.25 (Math/sqrt (/ (* (@sketch-state :width) (@sketch-state :height)) (count vertices))))}})))
 
 
@@ -221,33 +222,40 @@
         ctx (.getContext canvas "2d")
         vertices ()]
     (cleanup)
-    (doall
+    (doall ;; doseq?
      (map #(draw-arc canvas (-> % val :x) (-> % val :y) 3  0 (* 2 Math/PI) "#ffffff") data))))
 
 
 (defn draw-scalar-weather-data []
   (let [data (@sketch-data :data)
-        cells (apply vector (map #(assoc % :color-index (dec (Math/round (/ (math-log (% :value) 10) -2)))) (data :cells)))
+        cells  (mapv #(assoc % :color-index (dec (Math/round (/ (math-log (% :value) 10) -2)))) (data :cells))
         x-stepsize (/ (@sketch-state :width) (dec (data :x-dim)))
         y-stepsize (/ (@sketch-state :height) (dec (data :y-dim)))
         canvas (sel1 :#the-canvas)]
-    (do
-      (cleanup)
-      (doall
-       (map
-        (fn [x]
-          (do
-            (doall
-             (map
-              #(draw-rect
-                canvas
-                (* x x-stepsize)
-                (* % y-stepsize)
-                x-stepsize
-                y-stepsize
-                (color-palette ((cells (+ x (* % (dec (data :x-dim))))) :color-index)))
-              (range (dec (data :y-dim)))))))
-        (range (dec (data :x-dim))))))))
+    (cleanup)
+    (doseq [x (-> data :x-dim dec range) ;; double loop, like for-comprehension
+            y (-> data :y-dim dec range)]
+      (draw-rect canvas
+                 (* x x-stepsize)
+                 (* y y-stepsize)
+                 x-stepsize
+                 y-stepsize
+                 (color ((cells (+ x (* y (dec (data :x-dim))))) :color-index))))
+    #_(doall
+     (map
+      (fn [x]
+        (do
+          (doall
+           (map
+            #(draw-rect
+              canvas
+              (* x x-stepsize)
+              (* % y-stepsize)
+              x-stepsize
+              y-stepsize
+              (color ((cells (+ x (* % (dec (data :x-dim))))) :color-index)))
+            (range (dec (data :y-dim)))))))
+      (range (dec (data :x-dim)))))))
 
 ;; --- HTML STUFF ---
 
